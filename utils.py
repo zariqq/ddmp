@@ -53,15 +53,19 @@ class SelfAttention(nn.Module):
 
         self.scale = channels ** (-0.5)
 
+        # this need to resnet learn without attention
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+
     def forward(self, x: torch.Tensor):
         # x: (B, C, H, W)
         residual = x
         B, C, H, W = x.shape
         N = H * W
 
-        spacial = x.reshape(B, C, -1)  # (B, C, N)
-
-        qkv: torch.Tensor = self.qkv_w(spacial).permute(0, 2, 1)  # (B, N, 3 * C)
+        h = self.norm(x)
+        qkv = self.qkv_w(h)  # (B, 3 * C, H, W)
+        qkv = qkv.view(B, 3 * C, -1).permute(0, 2, 1)  # (B, N, 3 * C)
         q, k, v = qkv.chunk(3, dim=2)  # q, k, v: (B, N, C)
 
         attn_score = torch.matmul(q, k.transpose(-2, -1))  # (B, N, N)
@@ -79,27 +83,43 @@ TODO: implement wide ResNet block
 
 
 def test_te():
-    embed = TimeEmbedding(20, 80)
-    t = tensor([5])
-    out = embed(t)
-    assert out.shape == (1, 80), f"expected (1, 80), got {out.shape}"
+    with torch.no_grad():
+        embed = TimeEmbedding(20, 80)
+        t = tensor([5])
+        out = embed(t)
+        assert out.shape == (1, 80), f"expected (1, 80), got {out.shape}"
 
-    # 2. different timesteps give different embeddings
-    t1 = tensor([1])
-    t2 = tensor([50])
-    assert not torch.allclose(embed(t1), embed(t2))
+        # 2. different timesteps give different embeddings
+        t1 = tensor([1])
+        t2 = tensor([50])
+        assert not torch.allclose(embed(t1), embed(t2))
 
-    # 3. batch of timesteps works
-    t_batch = tensor([1, 10, 50, 100])
-    out_batch = embed(t_batch)
-    assert out_batch.shape == (4, 80)
+        # 3. batch of timesteps works
+        t_batch = tensor([1, 10, 50, 100])
+        out_batch = embed(t_batch)
+        assert out_batch.shape == (4, 80)
 
-    # 4. same t always gives same output (deterministic)
-    assert torch.allclose(embed(t1), embed(t1))
+        # 4. same t always gives same output (deterministic)
+        assert torch.allclose(embed(t1), embed(t1))
+
+
+def test_sa():
+    x = torch.randn(32, 12, 5, 6)
+    sa = SelfAttention(12, 3)
+
+    assert sa(x).shape == x.shape
+
+    assert torch.allclose(sa(x), x, atol=1e-04)
+
+    x = torch.randn_like(x, requires_grad=True)
+    loss = sa(x).sum()
+    loss.backward()
+    assert x.grad is not None
 
 
 if __name__ == "__main__":
     test_te()
+    test_sa()
 
     # import matplotlib.pyplot as plt
 
