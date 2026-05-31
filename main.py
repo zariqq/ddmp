@@ -10,7 +10,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch import tensor
 
-T = 1000
+from config import T
+
 noise_schedule = torch.linspace(10**-4, 0.02, T)
 noise_std = torch.sqrt(noise_schedule)
 alpha = 1 - noise_schedule

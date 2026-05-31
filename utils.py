@@ -1,14 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as func
 from torch import tensor
 from math import log as m_log
 
-T = 1000
-
-"""
-TODO: implement time embeddings
-"""
+from config import T
 
 
 class TimeEmbedding(nn.Module):
@@ -46,8 +43,34 @@ TODO: implement self-attention block
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, d_in, d_out):
+    def __init__(self, channels, num_groups):
         super().__init__()
+
+        self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=channels)
+
+        self.qkv_w = nn.Conv2d(channels, 3 * channels, kernel_size=1)
+        self.proj_out = nn.Conv2d(channels, channels, kernel_size=1)
+
+        self.scale = channels ** (-0.5)
+
+    def forward(self, x: torch.Tensor):
+        # x: (B, C, H, W)
+        residual = x
+        B, C, H, W = x.shape
+        N = H * W
+
+        spacial = x.reshape(B, C, -1)  # (B, C, N)
+
+        qkv: torch.Tensor = self.qkv_w(spacial).permute(0, 2, 1)  # (B, N, 3 * C)
+        q, k, v = qkv.chunk(3, dim=2)  # q, k, v: (B, N, C)
+
+        attn_score = torch.matmul(q, k.transpose(-2, -1))  # (B, N, N)
+        attn = func.softmax(attn_score * self.scale, dim=-1)
+        res = torch.matmul(attn, v).permute(0, 2, 1)  # (B, N, C) -> (B, C, N)
+
+        proj = self.proj_out(res.view(B, C, H, W))
+
+        return proj + residual
 
 
 """
