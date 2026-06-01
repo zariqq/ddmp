@@ -37,11 +37,6 @@ class TimeEmbedding(nn.Module):
         return self.net(enc)
 
 
-"""
-TODO: implement self-attention block
-"""
-
-
 class SelfAttention(nn.Module):
     def __init__(self, channels, num_groups):
         super().__init__()
@@ -79,6 +74,43 @@ class SelfAttention(nn.Module):
 
 """
 TODO: implement wide ResNet block
+"""
+
+
+class WideResNet(nn.Module):
+    def __init__(
+        self, in_channels, out_channels, time_emb_dim, num_groups, dropout=0.1
+    ):
+        super().__init__()
+
+        norm = nn.GroupNorm(num_groups=num_groups, num_channels=in_channels)
+        self.time_proj = nn.Linear(time_emb_dim, out_channels)
+        self.proj_res = nn.Conv2d(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=1, padding=1
+        )
+
+        self.backbone_first = nn.Sequential(
+            norm,  # (B, Cin, H, W)
+            nn.SiLU(),
+            nn.Conv2d(
+                in_channels, out_channels, kernel_size=3, padding=1
+            ),  # (B, Cout, H, W)
+        )
+        self.backbone_second = nn.Sequencial(
+            norm,
+            nn.SiLU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x, time_emb):
+        residual = self.proj_res(x)
+        bb1 = self.backbone_first(x)  # (B, Cout, H, W)
+        return self.backbone_second(bb1 + self.time_proj(time_emb)) + residual
+
+
+"""
+TODO: implement U-Net (the whole model with Wide ResNet and Attention blocks)
 """
 
 
