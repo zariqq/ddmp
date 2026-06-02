@@ -79,25 +79,38 @@ TODO: implement wide ResNet block
 
 class WideResNet(nn.Module):
     def __init__(
-        self, in_channels, out_channels, time_emb_dim, num_groups, dropout=0.1
+        self,
+        in_channels,
+        out_channels,
+        time_emb_dim,
+        dropout=0.1,
+        in_num_groups: int = None,
+        out_num_groups: int = None,
     ):
         super().__init__()
 
-        norm = nn.GroupNorm(num_groups=num_groups, num_channels=in_channels)
+        in_num_groups = in_num_groups if in_num_groups is not None else in_channels
+        out_num_groups = out_num_groups if out_num_groups is not None else out_channels
+
         self.time_proj = nn.Linear(time_emb_dim, out_channels)
-        self.proj_res = nn.Conv2d(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=1, padding=1
-        )
+        if in_channels == out_channels:
+            self.proj_res = nn.Identity()
+        else:
+            self.proj_res = nn.Conv2d(
+                in_channels=in_channels, out_channels=out_channels, kernel_size=1
+            )
 
         self.backbone_first = nn.Sequential(
-            norm,  # (B, Cin, H, W)
+            nn.GroupNorm(
+                num_groups=in_num_groups, num_channels=in_channels
+            ),  # (B, Cin, H, W)
             nn.SiLU(),
             nn.Conv2d(
                 in_channels, out_channels, kernel_size=3, padding=1
             ),  # (B, Cout, H, W)
         )
-        self.backbone_second = nn.Sequencial(
-            norm,
+        self.backbone_second = nn.Sequential(
+            nn.GroupNorm(num_groups=out_num_groups, num_channels=out_channels),
             nn.SiLU(),
             nn.Dropout2d(dropout),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
@@ -106,7 +119,9 @@ class WideResNet(nn.Module):
     def forward(self, x, time_emb):
         residual = self.proj_res(x)
         bb1 = self.backbone_first(x)  # (B, Cout, H, W)
-        return self.backbone_second(bb1 + self.time_proj(time_emb)) + residual
+        acc_time = bb1 + self.time_proj(time_emb)[:, :, None, None]
+        bb2 = self.backbone_second(acc_time)
+        return bb2 + residual
 
 
 """
