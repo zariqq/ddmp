@@ -5,7 +5,7 @@ import torch.nn.functional as func
 from torch import tensor
 from math import log as m_log
 
-from config import T
+from config import T, image_shape
 
 
 class TimeEmbedding(nn.Module):
@@ -127,3 +127,128 @@ class WideResNet(nn.Module):
 """
 TODO: implement U-Net (the whole model with Wide ResNet and Attention blocks)
 """
+
+
+class Block(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        time_emb_dim,
+        in_num_groups,
+        out_channels=None,
+        dropout=0.1,
+    ):
+        super().__init__()
+
+        out_channels = in_channels if out_channels is None else out_channels
+        self.resnet = WideResNet(
+            in_channels,
+            out_channels,
+            time_emb_dim,
+            dropout,
+            in_num_groups,
+            in_num_groups,
+        )
+        self.attn = SelfAttention(out_channels, in_num_groups)
+
+    def forward(self, x, time_emb):
+        h = self.resnet(x, time_emb)
+
+        return self.attn(h)
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Hypers:
+    time_emb_dim: int
+
+
+class UNet(nn.Module):
+    def __init__(self, hyp: Hypers):
+        super().__init__()
+
+        base_ch = 32
+        channel_mults = [2, 4, 8, 16]
+        num_groups = 32
+        time_emb_dim = hyp.time_emb_dim
+
+        self.time_emb = TimeEmbedding(time_emb_dim, time_emb_dim)
+
+        # input / output projections
+        self.start_conv = nn.Conv2d(image_shape[0], base_ch, kernel_size=3, padding=1)
+        self.end_conv = nn.Conv2d(base_ch, image_shape[0], kernel_size=3, padding=1)
+
+        # encoder
+        self.encoder = nn.ModuleList()
+        self.downsamples = nn.ModuleList()
+
+        skip_channels = []
+        in_ch = base_ch
+        for mult in channel_mults:
+            out_ch = base_ch * mult
+            self.encoder.append(Block(in_ch, time_emb_dim, num_groups))
+            self.downsamples.append(
+                nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1)
+            )
+            skip_channels.append(in_ch)
+
+            in_ch = out_ch
+
+        # bottleneck
+        self.bottleneck_res1 = WideResNet(
+            in_ch,
+            in_ch,
+            time_emb_dim,
+            in_num_groups=num_groups,
+            out_num_groups=num_groups,
+        )
+        self.bottleneck_attn = SelfAttention(in_ch, num_groups)
+        self.bottleneck_res2 = WideResNet(
+            in_ch,
+            in_ch,
+            time_emb_dim,
+            in_num_groups=num_groups,
+            out_num_groups=num_groups,
+        )
+
+        # decoder
+        self.upsamples = nn.ModuleList()
+        self.decoder = nn.ModuleList()
+
+        current_ch = in_ch
+        for skip_ch in reversed(skip_channels):
+            self.upsamples.append(
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(current_ch, skip_ch, kernel_size=3, padding=1),
+                )
+            )
+            self.decoder.append(
+                Block(skip_ch * 2, time_emb_dim, num_groups, out_channels=skip_ch)
+            )
+            current_ch = skip_ch
+
+    def forward(self, x, t):
+        h = self.start_conv(x)  # (B, base_ch, H, W)
+        t_emb = self.time_emb(t)
+
+        # encoder
+        skips = []
+        for enc_block, down in zip(self.encoder, self.downsamples):
+            h = enc_block(h, t_emb)
+            skips.append(h)
+            h = down(h)
+
+        h = self.bottleneck_res1(h, t_emb)
+        h = self.bottleneck_attn(h)
+        h = self.bottleneck_res2(h, t_emb)
+
+        # decoder
+        for dec_block, up in zip(self.decoder, self.upsamples):
+            h = up(h)  # (B, 2 * C, H / 2, W / 2) -> (B, C, H, W)
+            h = torch.cat([h, skips.pop()], dim=1)  # (B, 2 * C, H, W)
+            h = dec_block(h, t_emb)  # (B, C, H, W)
+
+        return self.end_conv(h)
