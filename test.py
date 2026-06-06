@@ -1,8 +1,10 @@
+import unittest
+
 import torch
 import torch.nn as nn
 from torch import tensor
-from utils import TimeEmbedding, SelfAttention, WideResNet
-import unittest
+
+from utils import SelfAttention, TimeEmbedding, WideResNet, UNet, Hypers
 
 
 class TestUtils(unittest.TestCase):
@@ -18,10 +20,10 @@ class TestUtils(unittest.TestCase):
             t2 = tensor([50])
             self.assertTrue(not torch.allclose(embed(t1), embed(t2)))
 
-            # 3. batch of timesteps works
-            t_batch = tensor([1, 10, 50, 100])
-            out_batch = embed(t_batch)
-            self.assertEqual(out_batch.shape, (4, 80))
+            # 3. B of timesteps works
+            t_B = tensor([1, 10, 50, 100])
+            out_B = embed(t_B)
+            self.assertEqual(out_B.shape, (4, 80))
 
             # 4. same t always gives same output (deterministic)
             self.assertTrue(torch.allclose(embed(t1), embed(t1)))
@@ -158,6 +160,99 @@ class TestWideResNet(unittest.TestCase):
         global_out = backbone(x, t) + proj(x)
 
         self.assertEqual(global_out.shape, (2, out_ch, 32, 32))
+
+
+B, C, H, W = 4, 3, 32, 32
+hyp = Hypers(128)
+model = UNet(hyp)
+
+
+class TestUNet(unittest.TestCase):
+
+    # ---------- Test 1: Basic forward shape ----------
+    def test_output_shape(self):
+        x = torch.randn(B, C, H, W)
+        t = torch.randint(0, 1000, (B,))
+        out = model(x, t)
+        self.assertEqual(
+            out.shape, x.shape, f"Expected shape {x.shape}, got {out.shape}"
+        )
+
+    # ---------- Test 2: Different B sizes ----------
+    def test_B_sizes(self):
+        for bs in [1, 2, 8]:
+            x = torch.randn(bs, C, H, W)
+            t = torch.randint(0, 1000, (bs,))
+            out = model(x, t)
+            self.assertEqual(out.shape, (bs, C, H, W), f"B {bs} failed")
+
+    # ---------- Test 3: Different spatial sizes (must be divisible by 16) ----------
+    def test_spatial_sizes(self):
+        for size in [32, 64, 128]:
+            x = torch.randn(2, C, size, size)
+            t = torch.randint(0, 1000, (2,))
+            out = model(x, t)
+            self.assertEqual(
+                out.shape, (2, C, size, size), f"Spatial size {size} failed"
+            )
+
+    # ---------- Test 4: Gradient flow ----------
+    def test_gradients(self):
+        model.train()
+        x = torch.randn(B, C, H, W, requires_grad=False)
+        t = torch.randint(0, 1000, (B,))
+        out = model(x, t)
+        loss = out.mean()
+        loss.backward()
+        # Check that at least some parameters received gradients
+        has_grad = any(
+            p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()
+        )
+        self.assertTrue(has_grad, "No gradients flowing")
+
+    # ---------- Test 5: Time embedding works with different t shapes ----------
+    def test_time_inputs(self):
+        # Single integer vs 1D tensor
+        model.eval()
+        x = torch.randn(1, C, H, W)
+        t_scalar = 42
+        out1 = model(x, torch.tensor([t_scalar]))
+        out2 = model(x, torch.tensor([t_scalar]))
+        self.assertTrue(
+            torch.allclose(out1, out2), "Repeated run with same t should be identical"
+        )
+
+        # Bed t
+        t_B = torch.randint(0, 1000, (4,))
+        out = model(torch.randn(4, C, H, W), t_B)
+        self.assertEqual(out.shape[0], 4, "Bed time failed")
+
+    # ---------- Test 6: Output not constant ----------
+    def test_output_variation(self):
+        model.eval()
+        x = torch.randn(4, C, H, W)
+        t = torch.randint(0, 1000, (4,))
+        out = model(x, t)
+        # Check that output varies across B
+        self.assertFalse(torch.allclose(out[0], out[1]), "Output should vary across B")
+
+    # ---------- Test 7: Quick training step (overfitting on a single B) ----------
+    def test_training_step(self):
+        model.train()
+        x = torch.randn(8, C, H, W)
+        t = torch.randint(0, 1000, (8,))
+        noise = torch.randn_like(x)
+        # Simple MSE loss like DDPM training (predict noise)
+        optim = torch.optim.Adam(model.parameters(), lr=1e-3)
+        for _ in range(5):
+            optim.zero_grad()
+            pred = model(x, t)
+            loss = ((pred - noise) ** 2).mean()
+            loss.backward()
+            optim.step()
+        # Loss should decrease if model can learn something
+        final_loss = loss.item()
+        self.assertTrue(final_loss < 1.0, f"Loss too high after 5 steps: {final_loss}")
 
 
 if __name__ == "__main__":
